@@ -1,0 +1,58 @@
+# Registre des fournisseurs de données.
+# status_audit : résultat de l'audit (voir docs/00_audit_et_architecture.md §2).
+#   - unverified  : implémenté, format attendu non encore confirmé contre la vraie API
+#   - verified    : contrat confirmé par les tests marqués `network`
+#   - not_operational : connecteur présent mais volontairement inactif
+sources:
+  pmu:
+    name: "PMU turfinfo (API JSON non documentée)"
+    base_url: "https://online.turfinfo.api.pmu.fr/rest/client/1"
+    kind: primary
+    enabled: true
+    free: true
+    status_audit: verified       # contrat confronté aux vraies réponses le 2026-10-30
+    pools: ["OFFLINE", "INTERNET"]  # masses de paris collectées (cotes distinctes)
+    min_interval_s: 1.0        # au plus 1 requête / seconde
+    timeout_s: 15
+    max_retries: 3
+    terms_note: >
+      Aucune licence de réutilisation publiée connue. Usage personnel, faible
+      fréquence, pas de redistribution. Lire les CGU de pmu.fr.
+
+  open_meteo:
+    name: "Open-Meteo (prévisions et archive)"
+    base_url: "https://api.open-meteo.com/v1"
+    archive_url: "https://archive-api.open-meteo.com/v1"
+    kind: enrichment
+    enabled: true
+    free: true
+    status_audit: unverified
+    min_interval_s: 0.5
+    timeout_s: 15
+    max_retries: 3
+    terms_note: "Gratuit pour usage non commercial, attribution CC BY 4.0."
+
+  open_pmu_api:
+    name: "Open PMU API (projet communautaire, code MIT)"
+    base_url: "https://open-pmu-api.vercel.app"
+    kind: secondary
+    enabled: true
+    free: true
+    status_audit: audited_code      # code audité ; réponses réelles non encore testées
+    min_interval_s: 2.0
+    timeout_s: 20
+    max_retries: 2
+    terms_note: >
+      Usage limité au recoupement des arrivées. Environ une course par jour
+      (Quinté+ probable), détails des seuls chevaux classés, cotes non horodatées
+      (jamais importées). Licence MIT sur le code uniquement, aucun droit sur les
+      données ; provenance des données non documentée ; mainteneur unique.
+
+  turf_bzh:
+    name: "Turf.bzh"
+    base_url: "https://www.turf.bzh"
+    kind: secondary
+    enabled: false
+    free: false
+    status_audit: not_operational
+    terms_note: "Exclu : décision projet = API gratuites uniquement."
