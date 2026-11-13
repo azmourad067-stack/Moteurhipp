@@ -29,6 +29,47 @@ class Check:
     detail: str
 
 
+def _entry_predecision_counts(raw: dict[str, pd.DataFrame]) -> tuple[int, int]:
+    """Return (entries without a pre-decision snapshot, identifiable entries)."""
+    races = raw["races"][["race_id", "scheduled_start_utc"]].copy()
+    races["decision_time"] = (
+        pd.to_datetime(races["scheduled_start_utc"], utc=True, errors="coerce")
+        - DECISION_OFFSET
+    )
+    races = races.dropna(subset=["decision_time"])
+    entries = raw["entries"][["race_id", "num_pmu", "observed_at"]].copy()
+    entries = entries.merge(
+        races[["race_id", "decision_time"]],
+        on="race_id",
+        how="inner",
+        validate="many_to_one",
+    )
+    identities = entries.dropna(subset=["race_id", "num_pmu"])[
+        ["race_id", "num_pmu"]
+    ].drop_duplicates()
+    if identities.empty:
+        return 0, 0
+
+    entries["observed_at"] = pd.to_datetime(
+        entries["observed_at"], utc=True, errors="coerce"
+    )
+    predecision = entries.loc[
+        entries["observed_at"].notna()
+        & entries["decision_time"].notna()
+        & (entries["observed_at"] <= entries["decision_time"]),
+        ["race_id", "num_pmu"],
+    ].drop_duplicates()
+    coverage = identities.merge(
+        predecision,
+        on=["race_id", "num_pmu"],
+        how="left",
+        indicator=True,
+        validate="one_to_one",
+    )
+    without_snapshot = int((coverage["_merge"] == "left_only").sum())
+    return without_snapshot, len(identities)
+
+
 def run_leakage_checks(raw: dict[str, pd.DataFrame], seed: int = 0) -> list[dict[str, Any]]:
     checks: list[Check] = []
     ds = build_dataset(raw)
@@ -88,9 +129,14 @@ def run_leakage_checks(raw: dict[str, pd.DataFrame], seed: int = 0) -> list[dict
     audit = audit_source_aggregates(f)
     checks.append(Check("Musique et cumuls avant course", audit.passed, audit.message))
 
-    # 5. information : engagements observés uniquement après le départ (collecte a posteriori)
-    share = float((~f["entry_seen_before_decision"]).mean())
-    checks.append(Check("Engagements observés avant décision", True,
-                        f"{100 * share:.0f} % des engagements ont été collectés après la course "
-                        "(historique rattrapé) ; seuls leurs champs déclaratifs sont utilisés"))
+    # 5. Couverture calculée sur les brutes : f ne contient que les lignes valides
+    # pré-décision et ne permet donc pas de mesurer les observations manquantes.
+    without_snapshot, total_entries = _entry_predecision_counts(raw)
+    share = without_snapshot / total_entries if total_entries else float("nan")
+    detail = (
+        f"{without_snapshot}/{total_entries} engagements sans snapshot observé avant "
+        f"la décision ({100 * share:.0f} %) ; les courses concernées sont exclues"
+        if total_entries else "Aucun engagement identifiable dans les données brutes."
+    )
+    checks.append(Check("Couverture des engagements à la décision", without_snapshot == 0, detail))
     return [asdict(c) for c in checks]
