@@ -111,23 +111,63 @@ def load_raw(engine: Engine, until: date | None = None) -> dict[str, pd.DataFram
 
 
 def _entries_at_decision(entries: pd.DataFrame, races: pd.DataFrame) -> pd.DataFrame:
-    """Version de chaque engagement connue à l'instant de décision.
+    """Dernière version d'engagement connue au plus tard à l'instant de décision.
 
-    Si aucune version n'a été observée avant la décision (collecte a posteriori),
-    la plus ancienne observation est retenue : les champs déclaratifs ne dépendent pas
-    de l'issue de la course (vérifié par l'audit de fuite).
+    Aucun fallback vers une observation future n'est autorisé. Si une entrée observée
+    dans la collecte n'a aucune version pré-décision, toute la course est exclue :
+    sa liste de partants ne peut pas être reconstruite sans fuite temporelle.
     """
-    e = entries.merge(races[["race_id", "decision_time"]], on="race_id")
-    e = e.sort_values("observed_at")
-    before = e[e["observed_at"] <= e["decision_time"]]
-    latest_before = before.drop_duplicates(["race_id", "num_pmu"], keep="last")
-    earliest = e.drop_duplicates(["race_id", "num_pmu"], keep="first")
-    missing = earliest.merge(latest_before[["race_id", "num_pmu"]], how="left",
-                             on=["race_id", "num_pmu"], indicator=True)
-    missing = missing[missing["_merge"] == "left_only"].drop(columns="_merge")
-    out = pd.concat([latest_before, missing], ignore_index=True)
-    out["entry_seen_before_decision"] = out["observed_at"] <= out["decision_time"]
-    return out
+    required_entries = {"race_id", "num_pmu", "observed_at", "status"}
+    required_races = {"race_id", "decision_time"}
+    missing_entries = required_entries.difference(entries.columns)
+    missing_races = required_races.difference(races.columns)
+    if missing_entries:
+        raise ValueError(f"Colonnes manquantes dans entries : {sorted(missing_entries)}")
+    if missing_races:
+        raise ValueError(f"Colonnes manquantes dans races : {sorted(missing_races)}")
+    if races["race_id"].duplicated().any():
+        raise ValueError("Plusieurs decision_time pour un même race_id")
+
+    decisions = races[["race_id", "decision_time"]].dropna().copy()
+    decisions["decision_time"] = pd.to_datetime(
+        decisions["decision_time"], utc=True, errors="coerce"
+    )
+    decisions = decisions.dropna(subset=["decision_time"])
+    empty = entries.iloc[0:0].copy()
+    empty["decision_time"] = pd.Series(dtype="datetime64[ns, UTC]")
+    empty["entry_seen_before_decision"] = pd.Series(dtype=bool)
+    if decisions.empty or entries.empty:
+        return empty
+
+    e = entries.merge(decisions, on="race_id")
+    e["observed_at"] = pd.to_datetime(e["observed_at"], utc=True, errors="coerce")
+    if e.empty:
+        return empty
+
+    # num_pmu est l'identifiant de l'engagement dans une course (schéma race_entries).
+    # Sans lui, il est impossible de vérifier la complétude : échec fermé pour la course.
+    invalid_races = set(e.loc[e["num_pmu"].isna(), "race_id"])
+    scoped = e[e["num_pmu"].notna()].copy()
+    before = scoped[
+        scoped["observed_at"].notna()
+        & (scoped["observed_at"] <= scoped["decision_time"])
+    ].copy()
+    latest = before.sort_values("observed_at", kind="mergesort").drop_duplicates(
+        ["race_id", "num_pmu"], keep="last"
+    )
+
+    expected = scoped[["race_id", "num_pmu"]].drop_duplicates()
+    seen = latest[["race_id", "num_pmu"]].drop_duplicates()
+    missing = expected.merge(
+        seen, on=["race_id", "num_pmu"], how="left", indicator=True
+    )
+    incomplete_races = set(
+        missing.loc[missing["_merge"] == "left_only", "race_id"]
+    )
+    excluded_races = invalid_races | incomplete_races
+    out = latest[~latest["race_id"].isin(excluded_races)].copy()
+    out["entry_seen_before_decision"] = True
+    return out.reset_index(drop=True)
 
 
 def _market(odds: pd.DataFrame, races: pd.DataFrame, runners: pd.DataFrame) -> pd.DataFrame:
@@ -137,8 +177,13 @@ def _market(odds: pd.DataFrame, races: pd.DataFrame, runners: pd.DataFrame) -> p
     seulement si tous les partants ont une cote ; sinon le marché est absent (NaN).
     """
     o = odds.merge(races[["race_id", "decision_time", "scheduled_start_utc"]], on="race_id")
-    o = o[o["published_at"].notna() & (o["published_at"] < o["scheduled_start_utc"])
-          & (o["published_at"] <= o["decision_time"])]
+    o = o[
+        o["published_at"].notna()
+        & o["observed_at"].notna()
+        & (o["published_at"] < o["scheduled_start_utc"])
+        & (o["published_at"] <= o["decision_time"])
+        & (o["observed_at"] <= o["decision_time"])
+    ]
     o = o.sort_values("published_at").drop_duplicates(["race_id", "num_pmu", "pool"],
                                                       keep="last")
     o = o.merge(runners[["race_id", "num_pmu"]], on=["race_id", "num_pmu"])
